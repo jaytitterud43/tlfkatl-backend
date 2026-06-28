@@ -22,14 +22,42 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 const API_KEY = process.env.BDL_API_KEY;
+// Optional manual lock controls:
+//   LOCK_PICKS=true        -> force locked regardless of time
+//   LOCK_PICKS=false       -> force open regardless of time
+//   (unset)                -> auto: lock once the first match kicks off
+const LOCK_OVERRIDE = process.env.LOCK_PICKS;
 
 let CACHE = { results:{}, liveScores:[], standings:{}, updatedAt:0 };
+
+// Returns { locked:bool, kickoff:ISO|null } — auto-derives the cutoff from the
+// earliest scheduled match in the live feed, so it tracks the real schedule.
+function lockState(){
+  if (LOCK_OVERRIDE === "true")  return { locked:true,  kickoff:null, forced:true };
+  if (LOCK_OVERRIDE === "false") return { locked:false, kickoff:null, forced:true };
+  const ms = CACHE.liveScores || [];
+  if (!ms.length) return { locked:false, kickoff:null };   // no data yet -> stay open
+  let earliest = null;
+  for (const m of ms){
+    const t = new Date(m.datetime).getTime();
+    if (!isNaN(t) && (earliest===null || t<earliest)) earliest = t;
+  }
+  if (earliest===null) return { locked:false, kickoff:null };
+  return { locked: Date.now() >= earliest, kickoff: new Date(earliest).toISOString() };
+}
 
 async function init(){
   await pool.query(`
     CREATE TABLE IF NOT EXISTS picks (
       username TEXT PRIMARY KEY, phone TEXT NOT NULL,
       picks JSONB NOT NULL, group_order JSONB NOT NULL, bets JSONB NOT NULL,
+      submitted_at BIGINT NOT NULL
+    );`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS brackets (
+      username TEXT PRIMARY KEY,
+      phone TEXT NOT NULL,
+      bracket JSONB NOT NULL,
       submitted_at BIGINT NOT NULL
     );`);
   console.log("DB ready");
@@ -66,6 +94,10 @@ async function leaderboard(){
 
 app.post("/picks", async (req,res)=>{
   try{
+    const lock = lockState();
+    if (lock.locked){
+      return res.status(403).json({ error:"Picks are locked. The tournament has started.", locked:true });
+    }
     const { username, phone, picks, order, bets, submittedAt } = req.body;
     if(!username||!phone||!picks||!order||!bets) return res.status(400).json({error:"Missing fields"});
     const u = String(username).trim().toLowerCase();
@@ -78,6 +110,49 @@ app.post("/picks", async (req,res)=>{
     res.json({ok:true});
   }catch(e){ console.error(e); res.status(500).json({error:"Save failed"}); }
 });
+
+// lets the frontend check lock status (to show a "locked" screen)
+app.get("/lockstatus", (_req,res)=> res.json(lockState()));
+
+// ── BRACKET ──
+// Bracket locks at the first knockout (R32) kickoff: 2026-06-28T19:00:00Z.
+// Override with BRACKET_LOCK=true/false.
+const BRACKET_KICKOFF = Date.parse("2026-06-28T19:00:00Z");
+function bracketLocked(){
+  const o=process.env.BRACKET_LOCK;
+  if(o==="true") return true;
+  if(o==="false") return false;
+  return Date.now() >= BRACKET_KICKOFF;
+}
+
+app.post("/bracket", async (req,res)=>{
+  try{
+    if(bracketLocked()) return res.status(403).json({error:"Bracket is locked. Knockouts have started.",locked:true});
+    const { username, phone, bracket, submittedAt } = req.body;
+    if(!username||!phone||!bracket) return res.status(400).json({error:"Missing fields"});
+    const u=String(username).trim().toLowerCase();
+    await pool.query(
+      `INSERT INTO brackets (username,phone,bracket,submitted_at)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (username) DO UPDATE SET phone=$2,bracket=$3,submitted_at=$4`,
+      [u, String(phone).trim(), JSON.stringify(bracket), submittedAt||Date.now()]
+    );
+    res.json({ok:true});
+  }catch(e){ console.error(e); res.status(500).json({error:"Save failed"}); }
+});
+
+app.get("/brackets", async (_req,res)=>{
+  try{ const r=await pool.query("SELECT * FROM brackets ORDER BY submitted_at ASC"); res.json(r.rows); }
+  catch(e){ res.status(500).json({error:"Read failed"}); }
+});
+
+app.get("/bracket/:username", async (req,res)=>{
+  try{ const r=await pool.query("SELECT * FROM brackets WHERE username=$1",[req.params.username.trim().toLowerCase()]);
+    res.json(r.rows[0]||null);
+  }catch(e){ res.status(500).json({error:"Read failed"}); }
+});
+
+app.get("/bracketlock", (_req,res)=> res.json({locked:bracketLocked(), kickoff:new Date(BRACKET_KICKOFF).toISOString()}));
 
 app.get("/picks", async (_req,res)=>{
   try{ const r=await pool.query("SELECT * FROM picks ORDER BY submitted_at ASC"); res.json(r.rows); }
