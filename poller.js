@@ -68,6 +68,41 @@ function mapResults(matches){
   return { results, liveScores };
 }
 
+// Extract KNOCKOUT results. Knockout games have no group. We key each result by
+// the unordered pair of OUR team names, since each pairing is unique in a bracket.
+// Winner accounts for penalty shootouts (a 90-min draw decided on pens).
+function knockoutResults(matches){
+  const out = {};            // "TeamA|TeamB" (sorted) -> { winner, a, b, status, datetime }
+  const liveKO = [];
+  for (const m of matches){
+    if (!m.home_team || !m.away_team) continue;   // TBD slot, not set yet
+    if (m.group) continue;                         // skip group games
+    const hName = ID_TO_NAME[m.home_team.id];
+    const aName = ID_TO_NAME[m.away_team.id];
+    if (!hName || !aName) continue;
+    const key = [hName, aName].sort().join("|");
+    let winner = null;
+    if (m.status === "completed"){
+      if (m.home_score > m.away_score) winner = hName;
+      else if (m.away_score > m.home_score) winner = aName;
+      else {
+        // draw after regulation/ET -> decided by penalties if the API provides them
+        const hp = m.home_penalty ?? m.home_pens ?? null;
+        const ap = m.away_penalty ?? m.away_pens ?? null;
+        if (hp != null && ap != null) winner = hp > ap ? hName : aName;
+        // if no pen data yet, leave winner null until the feed fills it in
+      }
+    }
+    out[key] = { winner, home:hName, away:aName,
+      homeScore:m.home_score ?? null, awayScore:m.away_score ?? null,
+      status:m.status, datetime:m.datetime };
+    liveKO.push({ home:hName, away:aName,
+      homeScore:m.home_score ?? null, awayScore:m.away_score ?? null,
+      status:m.status, datetime:m.datetime });
+  }
+  return { koByPair: out, liveKO };
+}
+
 // Derive final 1-4 standings per group, but ONLY for groups where all 6 games
 // are completed. Uses points -> goal difference -> goals for (standard tiebreak).
 function deriveStandings(results){
@@ -97,4 +132,4 @@ function deriveStandings(results){
   return standings;
 }
 
-module.exports = { fetchMatches, mapResults, deriveStandings };
+module.exports = { fetchMatches, mapResults, deriveStandings, knockoutResults };

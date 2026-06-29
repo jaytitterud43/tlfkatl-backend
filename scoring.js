@@ -82,4 +82,32 @@ function scorePhase1(player, results, finalStandings){
   return { points: pts, detail };
 }
 
-module.exports = { GAMES, GROUPS, GLETTERS, TEAMS, scorePhase1, PTS };
+// Phase 2 bracket scoring values per correct pick, by round.
+const BRACKET_PTS = { r32:6, r16:10, qf:18, sf:30, final:52 };
+
+// Score a person's bracket. bracket = {r32:[{match,pick}], r16:[...], qf, sf, final, champion}.
+// koByPair = { "TeamA|TeamB": {winner,...} } from the poller (knockout actuals).
+// Independent scoring: a pick scores if that team actually won the game between the
+// two teams in that bracket slot — regardless of whether earlier picks were right.
+function scorePhase2(bracket, koByPair){
+  if (!bracket) return { points:0, detail:{} };
+  let pts = 0;
+  const detail = {};
+  for (const round of ["r32","r16","qf","sf","final"]){
+    const arr = bracket[round] || [];
+    let hits = 0;
+    for (const g of arr){
+      if (!g || !g.pick || !g.match || g.match.length!==2) continue;
+      const [a,b] = g.match;
+      if (!a || !b) continue;                 // slot wasn't determined in their bracket
+      const key = [a,b].sort().join("|");
+      const actual = koByPair[key];
+      if (!actual || !actual.winner) continue; // game not played/decided yet
+      if (g.pick === actual.winner){ pts += BRACKET_PTS[round]; hits++; }
+    }
+    detail[round] = hits;
+  }
+  return { points: pts, detail };
+}
+
+module.exports = { GAMES, GROUPS, GLETTERS, TEAMS, scorePhase1, scorePhase2, PTS, BRACKET_PTS };

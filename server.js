@@ -10,8 +10,8 @@
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
-const { fetchMatches, mapResults, deriveStandings } = require("./poller.js");
-const { scorePhase1, TEAMS } = require("./scoring.js");
+const { fetchMatches, mapResults, deriveStandings, knockoutResults } = require("./poller.js");
+const { scorePhase1, scorePhase2, TEAMS } = require("./scoring.js");
 
 const app = express();
 app.use(cors());
@@ -69,8 +69,10 @@ async function poll(){
     const matches = await fetchMatches(API_KEY);
     const { results, liveScores } = mapResults(matches);
     const standings = deriveStandings(results);
-    CACHE = { results, liveScores, standings, updatedAt: Date.now() };
-    console.log(`Polled ${matches.length} matches; ${Object.keys(results).length} group games mapped; ${Object.keys(standings).length} groups final.`);
+    const { koByPair, liveKO } = knockoutResults(matches);
+    CACHE = { results, liveScores, standings, koByPair, liveKO, updatedAt: Date.now() };
+    const koDone = Object.values(koByPair).filter(k=>k.winner).length;
+    console.log(`Polled ${matches.length} matches; ${Object.keys(results).length} group games; ${Object.keys(standings).length} groups final; ${koDone} knockout results.`);
   } catch(e){ console.error("Poll failed:", e.message); }
 }
 
@@ -80,10 +82,19 @@ async function leaderboard(){
     username: row.username, phone: row.phone,
     picks: row.picks, order: row.group_order, bets: row.bets,
   }));
+  // bracket picks keyed by username
+  const br = await pool.query("SELECT * FROM brackets");
+  const brByUser = {};
+  for (const row of br.rows) brByUser[row.username] = row.bracket;
+
   const board = players.map(p=>{
-    const { points, detail } = scorePhase1(p, CACHE.results, CACHE.standings);
+    const p1 = scorePhase1(p, CACHE.results, CACHE.standings);
+    const p2 = scorePhase2(brByUser[p.username], CACHE.koByPair || {});
     return {
-      username: p.username, points, detail,
+      username: p.username,
+      points: p1.points + p2.points,
+      phase1: p1.points, phase2: p2.points,
+      detail: p1.detail, bracketDetail: p2.detail,
       darkhorse: p.bets.darkhorse || null,
       flop: p.bets.flop || null,
       goldenboot: p.bets.goldenboot || null,
@@ -171,6 +182,7 @@ app.get("/scores", async (_req,res)=>{
 });
 
 app.get("/live", (_req,res)=>{ res.json({ matches: CACHE.liveScores, updatedAt: CACHE.updatedAt }); });
+app.get("/knockout", (_req,res)=>{ res.json({ matches: CACHE.liveKO || [], koByPair: CACHE.koByPair || {}, updatedAt: CACHE.updatedAt }); });
 
 app.post("/refresh", async (_req,res)=>{ await poll(); res.json({ok:true, updatedAt:CACHE.updatedAt}); });
 
