@@ -87,17 +87,22 @@ function knockoutResults(matches){
       else if (m.away_score > m.home_score) winner = aName;
       else {
         // draw after regulation/ET -> decided by penalties if the API provides them
-        const hp = m.home_penalty ?? m.home_pens ?? null;
-        const ap = m.away_penalty ?? m.away_pens ?? null;
+        // penalty shootout — BALLDONTLIE uses *_score_penalties
+        const hp = m.home_score_penalties ?? null;
+        const ap = m.away_score_penalties ?? null;
         if (hp != null && ap != null) winner = hp > ap ? hName : aName;
         // if no pen data yet, leave winner null until the feed fills it in
       }
     }
+    const hpen = m.home_score_penalties ?? null;
+    const apen = m.away_score_penalties ?? null;
     out[key] = { winner, home:hName, away:aName,
       homeScore:m.home_score ?? null, awayScore:m.away_score ?? null,
+      homePens:hpen, awayPens:apen, pens:(hpen!=null&&apen!=null),
       status:m.status, datetime:m.datetime };
     liveKO.push({ home:hName, away:aName,
       homeScore:m.home_score ?? null, awayScore:m.away_score ?? null,
+      homePens:hpen, awayPens:apen, pens:(hpen!=null&&apen!=null),
       status:m.status, datetime:m.datetime });
   }
   return { koByPair: out, liveKO };
