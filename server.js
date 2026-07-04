@@ -60,6 +60,13 @@ async function init(){
       bracket JSONB NOT NULL,
       submitted_at BIGINT NOT NULL
     );`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS brackets2 (
+      username TEXT PRIMARY KEY,
+      phone TEXT NOT NULL,
+      bracket JSONB NOT NULL,
+      submitted_at BIGINT NOT NULL
+    );`);
   console.log("DB ready");
 }
 
@@ -86,10 +93,14 @@ async function leaderboard(){
   const br = await pool.query("SELECT * FROM brackets");
   const brByUser = {};
   for (const row of br.rows) brByUser[row.username] = row.bracket;
+  // re-picks (correct-tree R16 onward) keyed by username
+  const br2 = await pool.query("SELECT * FROM brackets2");
+  const br2ByUser = {};
+  for (const row of br2.rows) br2ByUser[row.username] = row.bracket;
 
   const board = players.map(p=>{
     const p1 = scorePhase1(p, CACHE.results, CACHE.standings);
-    const p2 = scorePhase2(brByUser[p.username], CACHE.koByPair || {});
+    const p2 = scorePhase2(brByUser[p.username], br2ByUser[p.username], CACHE.koByPair || {});
     return {
       username: p.username,
       points: p1.points + p2.points,
@@ -161,6 +172,70 @@ app.get("/bracket/:username", async (req,res)=>{
   try{ const r=await pool.query("SELECT * FROM brackets WHERE username=$1",[req.params.username.trim().toLowerCase()]);
     res.json(r.rows[0]||null);
   }catch(e){ res.status(500).json({error:"Read failed"}); }
+});
+
+// ── BRACKET RE-PICK (correct-tree R16 onward) ──
+// Per-game lock: a matchup is locked once its kickoff has passed (from live feed).
+// The two auto-awarded R16 games (Canada/Morocco, France/Paraguay) are not re-picked.
+const AUTO_R16_KEYS = [["Canada","Morocco"],["France","Paraguay"]].map(p=>p.slice().sort().join("|"));
+
+// kickoff time (ms) for a matchup, looked up from the knockout live feed by team pair
+function koKickoff(a,b){
+  const key=[a,b].sort().join("|");
+  const g = (CACHE.koByPair||{})[key];
+  return g?.datetime ? Date.parse(g.datetime) : null;
+}
+function matchupLocked(a,b){
+  const o=process.env.BRACKET2_LOCK;
+  if(o==="false") return false;      // force everything open (testing)
+  if(o==="true") return true;        // force everything locked
+  const t=koKickoff(a,b);
+  if(t===null) return false;         // unknown/not scheduled yet -> open
+  return Date.now() >= t;            // locked once it kicks off
+}
+
+app.post("/bracket2", async (req,res)=>{
+  try{
+    const { username, phone, bracket, submittedAt } = req.body;
+    if(!username||!phone||!bracket) return res.status(400).json({error:"Missing fields"});
+    const u=String(username).trim().toLowerCase();
+
+    // Reject picks for any R16 game that's already kicked off (or auto-awarded).
+    for (const g of (bracket.r16||[])){
+      if(!g||!g.match||g.match.length!==2) continue;
+      const [a,b]=g.match; if(!a||!b) continue;
+      const key=[a,b].sort().join("|");
+      if(AUTO_R16_KEYS.includes(key)) continue;       // not re-picked; ignore if present
+      if(matchupLocked(a,b)){
+        return res.status(403).json({error:`That matchup (${a} v ${b}) has already kicked off.`,locked:true});
+      }
+    }
+    await pool.query(
+      `INSERT INTO brackets2 (username,phone,bracket,submitted_at)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (username) DO UPDATE SET phone=$2,bracket=$3,submitted_at=$4`,
+      [u, String(phone).trim(), JSON.stringify(bracket), submittedAt||Date.now()]
+    );
+    res.json({ok:true});
+  }catch(e){ console.error(e); res.status(500).json({error:"Save failed"}); }
+});
+
+app.get("/brackets2", async (_req,res)=>{
+  try{ const r=await pool.query("SELECT * FROM brackets2 ORDER BY submitted_at ASC"); res.json(r.rows); }
+  catch(e){ res.status(500).json({error:"Read failed"}); }
+});
+app.get("/bracket2/:username", async (req,res)=>{
+  try{ const r=await pool.query("SELECT * FROM brackets2 WHERE username=$1",[req.params.username.trim().toLowerCase()]);
+    res.json(r.rows[0]||null);
+  }catch(e){ res.status(500).json({error:"Read failed"}); }
+});
+// tells the re-pick UI which R16 matchups are still open vs locked
+app.get("/repickstatus", (_req,res)=>{
+  const r16 = (CACHE.liveKO||[]).filter(m=>{
+    const key=[m.home,m.away].sort().join("|");
+    return !AUTO_R16_KEYS.includes(key);
+  });
+  res.json({ autoAwarded:[["Canada","Morocco"],["France","Paraguay"]], matches:CACHE.liveKO||[], updatedAt:CACHE.updatedAt });
 });
 
 app.get("/bracketlock", (_req,res)=> res.json({locked:bracketLocked(), kickoff:new Date(BRACKET_KICKOFF).toISOString()}));

@@ -85,29 +85,52 @@ function scorePhase1(player, results, finalStandings){
 // Phase 2 bracket scoring values per correct pick, by round.
 const BRACKET_PTS = { r32:6, r16:10, qf:18, sf:30, final:52 };
 
-// Score a person's bracket. bracket = {r32:[{match,pick}], r16:[...], qf, sf, final, champion}.
-// koByPair = { "TeamA|TeamB": {winner,...} } from the poller (knockout actuals).
-// Independent scoring: a pick scores if that team actually won the game between the
-// two teams in that bracket slot — regardless of whether earlier picks were right.
-function scorePhase2(bracket, koByPair){
-  if (!bracket) return { points:0, detail:{} };
+// R16 games auto-awarded to everyone (already underway when the re-pick opened),
+// keyed by sorted team pair. Everyone gets full R16 points (10) for these.
+const AUTO_AWARD_R16 = [
+  ["Canada","Morocco"],
+  ["France","Paraguay"],
+];
+const AUTO_KEYS = AUTO_AWARD_R16.map(p => p.slice().sort().join("|"));
+
+// Score a person's bracket.
+//   bracket  = the ORIGINAL submission (used for R32 only): {r32:[{match,pick}], ...}
+//   bracket2 = the RE-PICK on the correct tree (used for R16 onward): {r16,qf,sf,final,champion}
+//   koByPair = { "TeamA|TeamB": {winner,...} } actual knockout results.
+// R32 scores from `bracket`. The two AUTO_AWARD_R16 games give everyone 10 pts flat.
+// All other R16/QF/SF/Final score from `bracket2` on the correct matchups.
+function scorePhase2(bracket, bracket2, koByPair){
   let pts = 0;
-  const detail = {};
-  for (const round of ["r32","r16","qf","sf","final"]){
-    const arr = bracket[round] || [];
-    let hits = 0;
-    for (const g of arr){
-      if (!g || !g.pick || !g.match || g.match.length!==2) continue;
-      const [a,b] = g.match;
-      if (!a || !b) continue;                 // slot wasn't determined in their bracket
-      const key = [a,b].sort().join("|");
-      const actual = koByPair[key];
-      if (!actual || !actual.winner) continue; // game not played/decided yet
-      if (g.pick === actual.winner){ pts += BRACKET_PTS[round]; hits++; }
-    }
-    detail[round] = hits;
+  const detail = { r32:0, r16:0, qf:0, sf:0, final:0, autoR16:0 };
+
+  // R32 — from original bracket
+  for (const g of (bracket?.r32 || [])){
+    if (!g || !g.pick || !g.match || g.match.length!==2) continue;
+    const [a,b] = g.match; if (!a||!b) continue;
+    const actual = koByPair[[a,b].sort().join("|")];
+    if (!actual || !actual.winner) continue;
+    if (g.pick === actual.winner){ pts += BRACKET_PTS.r32; detail.r32++; }
   }
+
+  // Auto-awarded R16 games — everyone gets full R16 points, no pick needed
+  for (const k of AUTO_KEYS){
+    pts += BRACKET_PTS.r16; detail.autoR16++;
+  }
+
+  // R16 onward — from the re-pick (correct tree). Skip auto-awarded games to avoid double count.
+  for (const round of ["r16","qf","sf","final"]){
+    for (const g of (bracket2?.[round] || [])){
+      if (!g || !g.pick || !g.match || g.match.length!==2) continue;
+      const [a,b] = g.match; if (!a||!b) continue;
+      const key = [a,b].sort().join("|");
+      if (round==="r16" && AUTO_KEYS.includes(key)) continue; // already auto-awarded
+      const actual = koByPair[key];
+      if (!actual || !actual.winner) continue;
+      if (g.pick === actual.winner){ pts += BRACKET_PTS[round]; detail[round]++; }
+    }
+  }
+
   return { points: pts, detail };
 }
 
-module.exports = { GAMES, GROUPS, GLETTERS, TEAMS, scorePhase1, scorePhase2, PTS, BRACKET_PTS };
+module.exports = { GAMES, GROUPS, GLETTERS, TEAMS, scorePhase1, scorePhase2, PTS, BRACKET_PTS, AUTO_AWARD_R16 };
