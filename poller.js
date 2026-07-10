@@ -96,14 +96,16 @@ function knockoutResults(matches){
     }
     const hpen = m.home_score_penalties ?? null;
     const apen = m.away_score_penalties ?? null;
+    // stage.name / round_name tell us which round this game is (Round of 32, Round of 16, etc.)
+    const roundName = (m.stage && m.stage.name) || m.round_name || null;
     out[key] = { winner, home:hName, away:aName,
       homeScore:m.home_score ?? null, awayScore:m.away_score ?? null,
       homePens:hpen, awayPens:apen, pens:(hpen!=null&&apen!=null),
-      status:m.status, datetime:m.datetime };
+      round:roundName, status:m.status, datetime:m.datetime };
     liveKO.push({ home:hName, away:aName,
       homeScore:m.home_score ?? null, awayScore:m.away_score ?? null,
       homePens:hpen, awayPens:apen, pens:(hpen!=null&&apen!=null),
-      status:m.status, datetime:m.datetime });
+      round:roundName, status:m.status, datetime:m.datetime });
   }
   return { koByPair: out, liveKO };
 }

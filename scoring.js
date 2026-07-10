@@ -93,17 +93,41 @@ const AUTO_AWARD_R16 = [
 ];
 const AUTO_KEYS = AUTO_AWARD_R16.map(p => p.slice().sort().join("|"));
 
+// Map our round keys to the round names the poller stores (from the API stage name).
+const ROUND_NAME = { r32:"Round of 32", r16:"Round of 16", qf:"Quarterfinal", sf:"Semifinal", final:"Final" };
+
+// Normalize round names so "Quarterfinal"/"Quarterfinals"/"quarter-final" all compare equal.
+function roundNameMatches(actual, want){
+  if (!actual || !want) return false;
+  const norm = s => String(s).toLowerCase().replace(/[-\s]/g,"").replace(/s$/,"");
+  return norm(actual) === norm(want);
+}
+
+// Did `team` win its real game in the given round? Opponent-agnostic and round-scoped.
+// A team plays at most one game per round, so we find that game and check the winner.
+function teamWonInRound(team, roundKey, koByPair){
+  const wantRound = ROUND_NAME[roundKey];
+  for (const g of Object.values(koByPair)){
+    if (!g) continue;
+    if (g.home !== team && g.away !== team) continue;      // team not in this game
+    if (g.round && !roundNameMatches(g.round, wantRound)) continue; // wrong round, skip
+    if (!g.winner) return false;                            // team's game not decided yet
+    return g.winner === team;                               // credit iff team won it
+  }
+  return false;                                             // no game found for team this round
+}
+
 // Score a person's bracket.
-//   bracket  = the ORIGINAL submission (used for R32 only): {r32:[{match,pick}], ...}
-//   bracket2 = the RE-PICK on the correct tree (used for R16 onward): {r16,qf,sf,final,champion}
-//   koByPair = { "TeamA|TeamB": {winner,...} } actual knockout results.
-// R32 scores from `bracket`. The two AUTO_AWARD_R16 games give everyone 10 pts flat.
-// All other R16/QF/SF/Final score from `bracket2` on the correct matchups.
+//   bracket  = ORIGINAL submission (R32 only): {r32:[{match,pick}], ...}
+//   bracket2 = RE-PICK (R16 onward): {r16,qf,sf,final,champion}
+//   koByPair = { "TeamA|TeamB": {winner, home, away, round, ...} } actual results.
+// R32 & auto games unchanged. R16/QF/SF/Final now score on "did my picked team win
+// its real game that round" — the projected opponent is irrelevant.
 function scorePhase2(bracket, bracket2, koByPair){
   let pts = 0;
   const detail = { r32:0, r16:0, qf:0, sf:0, final:0, autoR16:0 };
 
-  // R32 — from original bracket
+  // R32 — from original bracket (exact matchup is correct by construction; keep as-is)
   for (const g of (bracket?.r32 || [])){
     if (!g || !g.pick || !g.match || g.match.length!==2) continue;
     const [a,b] = g.match; if (!a||!b) continue;
@@ -117,16 +141,18 @@ function scorePhase2(bracket, bracket2, koByPair){
     pts += BRACKET_PTS.r16; detail.autoR16++;
   }
 
-  // R16 onward — from the re-pick (correct tree). Skip auto-awarded games to avoid double count.
+  // R16 onward — score by whether the PICKED TEAM won its real game that round.
   for (const round of ["r16","qf","sf","final"]){
     for (const g of (bracket2?.[round] || [])){
-      if (!g || !g.pick || !g.match || g.match.length!==2) continue;
-      const [a,b] = g.match; if (!a||!b) continue;
-      const key = [a,b].sort().join("|");
-      if (round==="r16" && AUTO_KEYS.includes(key)) continue; // already auto-awarded
-      const actual = koByPair[key];
-      if (!actual || !actual.winner) continue;
-      if (g.pick === actual.winner){ pts += BRACKET_PTS[round]; detail[round]++; }
+      if (!g || !g.pick) continue;
+      // skip the auto-awarded R16 games (already credited to everyone)
+      if (round==="r16" && g.match && g.match.length===2){
+        const key = [g.match[0],g.match[1]].sort().join("|");
+        if (AUTO_KEYS.includes(key)) continue;
+      }
+      if (teamWonInRound(g.pick, round, koByPair)){
+        pts += BRACKET_PTS[round]; detail[round]++;
+      }
     }
   }
 
