@@ -120,10 +120,12 @@ function teamWonInRound(team, roundKey, koByPair){
 // Score a person's bracket.
 //   bracket  = ORIGINAL submission (R32 only): {r32:[{match,pick}], ...}
 //   bracket2 = RE-PICK (R16 onward): {r16,qf,sf,final,champion}
+//   bracket3 = SEMIS/FINAL re-pick (sf, final, champion) made once all QFs were known.
+//              When present it OVERRIDES bracket2 for sf/final. R16/QF always from bracket2.
 //   koByPair = { "TeamA|TeamB": {winner, home, away, round, ...} } actual results.
-// R32 & auto games unchanged. R16/QF/SF/Final now score on "did my picked team win
+// R32 & auto games unchanged. R16/QF/SF/Final score on "did my picked team win
 // its real game that round" — the projected opponent is irrelevant.
-function scorePhase2(bracket, bracket2, koByPair){
+function scorePhase2(bracket, bracket2, koByPair, bracket3){
   let pts = 0;
   const detail = { r32:0, r16:0, qf:0, sf:0, final:0, autoR16:0 };
 
@@ -141,9 +143,18 @@ function scorePhase2(bracket, bracket2, koByPair){
     pts += BRACKET_PTS.r16; detail.autoR16++;
   }
 
-  // R16 onward — score by whether the PICKED TEAM won its real game that round.
+  // Pick the source for each round: R16/QF always from bracket2;
+  // SF/Final from bracket3 if that round has picks there, else fall back to bracket2.
+  const sourceFor = (round) => {
+    if ((round==="sf" || round==="final") && bracket3 && Array.isArray(bracket3[round]) && bracket3[round].length){
+      return bracket3;
+    }
+    return bracket2;
+  };
+
   for (const round of ["r16","qf","sf","final"]){
-    for (const g of (bracket2?.[round] || [])){
+    const src = sourceFor(round);
+    for (const g of (src?.[round] || [])){
       if (!g || !g.pick) continue;
       // skip the auto-awarded R16 games (already credited to everyone)
       if (round==="r16" && g.match && g.match.length===2){

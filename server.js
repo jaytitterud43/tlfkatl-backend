@@ -13,6 +13,26 @@ const { Pool } = require("pg");
 const { fetchMatches, mapResults, deriveStandings, knockoutResults } = require("./poller.js");
 const { scorePhase1, scorePhase2, TEAMS } = require("./scoring.js");
 
+// ── Bucket 3: prop settlement (frozen once, end of tournament) ──
+// Penaldo v Pessi: +5 to "Pessi" pickers. Golden Nostril: +5 to "No — they don't"
+// (Portugal missed the semis). Dark Horse: +18 to "Norway" pickers (reached QF).
+// Flop: nobody correct (0). Chum v Cum: +5 to "Chum (Africa)" pickers.
+// Values computed from each player's stored bets and locked in here.
+const PROP_POINTS = {
+  "tittenheimer": 28,
+  "goose": 23,
+  "johnaldinho": 15,
+  "vansteenhuyse_nick": 15,
+  "gavinweitzenberg": 15,
+  "jbdd": 15,
+  "natekush": 10,
+  "cam": 10,
+  "cassiusthundercock": 10,
+  "maxcondron": 10,
+  "als7": 5,
+  "will khouri": 5,
+};
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -67,6 +87,13 @@ async function init(){
       bracket JSONB NOT NULL,
       submitted_at BIGINT NOT NULL
     );`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS brackets3 (
+      username TEXT PRIMARY KEY,
+      phone TEXT NOT NULL,
+      bracket JSONB NOT NULL,
+      submitted_at BIGINT NOT NULL
+    );`);
   console.log("DB ready");
 }
 
@@ -97,14 +124,21 @@ async function leaderboard(){
   const br2 = await pool.query("SELECT * FROM brackets2");
   const br2ByUser = {};
   for (const row of br2.rows) br2ByUser[row.username] = row.bracket;
+  // semis/final re-picks keyed by username (may be empty table early)
+  const br3ByUser = {};
+  try {
+    const br3 = await pool.query("SELECT * FROM brackets3");
+    for (const row of br3.rows) br3ByUser[row.username] = row.bracket;
+  } catch(e){ /* table may not exist yet; ignore */ }
 
   const board = players.map(p=>{
     const p1 = scorePhase1(p, CACHE.results, CACHE.standings);
-    const p2 = scorePhase2(brByUser[p.username], br2ByUser[p.username], CACHE.koByPair || {});
+    const p2 = scorePhase2(brByUser[p.username], br2ByUser[p.username], CACHE.koByPair || {}, br3ByUser[p.username]);
+    const p3 = PROP_POINTS[p.username] || 0;   // Bucket 3: one-time prop settlement (frozen)
     return {
       username: p.username,
-      points: p1.points + p2.points,
-      phase1: p1.points, phase2: p2.points,
+      points: p1.points + p2.points + p3,
+      phase1: p1.points, phase2: p2.points, phase3: p3,
       detail: p1.detail, bracketDetail: p2.detail,
       darkhorse: p.bets.darkhorse || null,
       flop: p.bets.flop || null,
@@ -226,6 +260,45 @@ app.get("/brackets2", async (_req,res)=>{
 });
 app.get("/bracket2/:username", async (req,res)=>{
   try{ const r=await pool.query("SELECT * FROM brackets2 WHERE username=$1",[req.params.username.trim().toLowerCase()]);
+    res.json(r.rows[0]||null);
+  }catch(e){ res.status(500).json({error:"Read failed"}); }
+});
+
+// ── bracket3: semis/final re-pick (made once all QFs known) ──
+// Locks once any semifinal has kicked off. Env BRACKET3_LOCK overrides ("true"/"false").
+function semisLocked(){
+  const o=process.env.BRACKET3_LOCK;
+  if(o==="false") return false;
+  if(o==="true") return true;
+  const ko = CACHE.koByPair || {};
+  return Object.values(ko).some(g =>
+    g && g.round && String(g.round).toLowerCase().startsWith("semi") && g.status && g.status!=="scheduled"
+  );
+}
+app.get("/bracket3lock", (_req,res)=> res.json({ locked: semisLocked() }));
+
+app.post("/bracket3", async (req,res)=>{
+  try{
+    const { username, phone, bracket, submittedAt } = req.body;
+    if(!username||!phone||!bracket) return res.status(400).json({error:"Missing fields"});
+    if(semisLocked()) return res.status(403).json({error:"The semifinals have kicked off — picks are locked.",locked:true});
+    const u=String(username).trim().toLowerCase();
+    await pool.query(
+      `INSERT INTO brackets3 (username,phone,bracket,submitted_at)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (username) DO UPDATE SET phone=$2,bracket=$3,submitted_at=$4`,
+      [u, String(phone).trim(), JSON.stringify(bracket), submittedAt||Date.now()]
+    );
+    res.json({ok:true});
+  }catch(e){ console.error(e); res.status(500).json({error:"Save failed"}); }
+});
+
+app.get("/brackets3", async (_req,res)=>{
+  try{ const r=await pool.query("SELECT * FROM brackets3 ORDER BY submitted_at ASC"); res.json(r.rows); }
+  catch(e){ res.status(500).json({error:"Read failed"}); }
+});
+app.get("/bracket3/:username", async (req,res)=>{
+  try{ const r=await pool.query("SELECT * FROM brackets3 WHERE username=$1",[req.params.username.trim().toLowerCase()]);
     res.json(r.rows[0]||null);
   }catch(e){ res.status(500).json({error:"Read failed"}); }
 });
